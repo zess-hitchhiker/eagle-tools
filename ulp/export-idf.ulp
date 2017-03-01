@@ -1,3 +1,9 @@
+#usage "en: Export IDF board\n"
+			"Exports current board in Intermediate Data Format, Version 3.0\n"
+			"Usage: RUN export-idf.ulp\n"
+			"Author: behner@zess.uni-siegen.de"
+			"Author: reuter@zess.uni-siegen.de"
+
 string boardFilename = "test.emn";
 string libFilename = "test.emp";
 
@@ -391,17 +397,20 @@ void createTraceOutline() {
 		
 	}
 }
+if (board) {
+	board(B) {
+		boardFilename = filesetext(B.name, ".emn");
+		libFilename = filesetext(B.name, ".emp");
 
-board(B) {
-	boardFilename = filesetext(B.name, ".emn");
-	libFilename = filesetext(B.name, ".emp");
-
-	createBoardFileHeader();
-	createBoardOutline();
-	//createTraceOutline();
-	createDrilledHolesSection();
-	createComponentPlacementSection();
-	
-	createLibFileHeader();
-	createElectricalComponentSection();
+		createBoardFileHeader();
+		createBoardOutline();
+		//createTraceOutline();
+		createDrilledHolesSection();
+		createComponentPlacementSection();
+		
+		createLibFileHeader();
+		createElectricalComponentSection();
+	}
+} else {
+	dlgMessageBox(":Please run ulp in board");
 }

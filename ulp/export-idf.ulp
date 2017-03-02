@@ -1,5 +1,10 @@
 #usage "en: Export IDF board\n"
 			"Exports current board in Intermediate Data Format, Version 3.0\n"
+			"The components are named using the package name defined in the Eagle library\n"
+			"IDF_FAMILYNAME : If present, the IDF package name is overwritten by the attribute value\n"
+			"IDF_PARTNUMBER : If present, the IDF part number is overwritten by the attribute value\n"
+			"HEIGHT : Is used together with the keepout layer to define a simple extrusion model as fallback\n"
+			"_IDF_IGNORE_ : If present, the component is not exported to IDF. Does not care about the value.\n" 
 			"Usage: RUN export-idf.ulp\n"
 			"Author: behner@zess.uni-siegen.de"
 			"Author: reuter@zess.uni-siegen.de"
@@ -26,6 +31,14 @@ real atan2(real y, real x) {
 	if (x==0 && y==0) {
 		return 0;
 	}
+}
+
+int isAttribute(UL_ELEMENT el, string attributeName){
+	el.attributes(att){
+		if (att.name == attributeName)
+			return 1;
+	}
+	return 0;
 }
 
 string strrep(string s, char old, char new) {
@@ -68,11 +81,13 @@ void createDrilledHolesSection() {
 
 			/* Create Component Pins/Holes */
 			B.elements(E) {
-				string referenceDesignator = E.name;
-				E.package.holes(H) printf("%.3f %.3f %.3f NPTH %s MTG ECAD\n",u2mm(H.drill), u2mm(H.x), u2mm(H.y), referenceDesignator);
-				E.package.contacts(C) {
-					if (C.pad) {
-						printf("%.3f %.3f %.3f PTH %s PIN ECAD\n",u2mm(C.pad.drill), u2mm(C.pad.x), u2mm(C.pad.y), referenceDesignator);
+				if (!isAttribute(E,"_IDF_IGNORE_")){
+					string referenceDesignator = E.name;
+					E.package.holes(H) printf("%.3f %.3f %.3f NPTH %s MTG ECAD\n",u2mm(H.drill), u2mm(H.x), u2mm(H.y), referenceDesignator);
+					E.package.contacts(C) {
+						if (C.pad) {
+							printf("%.3f %.3f %.3f PTH %s PIN ECAD\n",u2mm(C.pad.drill), u2mm(C.pad.x), u2mm(C.pad.y), referenceDesignator);
+						}
 					}
 				}
 			}
@@ -85,19 +100,21 @@ void createComponentPlacementSection() {
 	output(boardFilename, "at") {
 		printf(".PLACEMENT\n");
 		board(B) B.elements(E) {
-			string packageName = E.attribute["IDF_FAMILYNAME"];
-			if (packageName=="")
-				packageName = E.package.name;
-			string partNumber = E.attribute["IDF_PARTNUMBER"];
-			if (partNumber=="")
-				partNumber = E.package.name;
-			string referenceDesignator = E.name;
-			printf("%s %s %s\n",packageName, partNumber, referenceDesignator);
-			real mountingOffset = 0;
-			string placementSide = "TOP";
-			if (E.mirror)
-				placementSide = "BOTTOM";
-			printf("%.3f %.3f %.3f %0.3f %s ECAD\n",u2mm(E.x), u2mm(E.y), mountingOffset, E.angle, placementSide);
+			if (!isAttribute(E,"_IDF_IGNORE_")){
+				string packageName = E.attribute["IDF_FAMILYNAME"];
+				if (packageName=="")
+					packageName = E.package.name;
+				string partNumber = E.attribute["IDF_PARTNUMBER"];
+				if (partNumber=="")
+					partNumber = E.package.name;
+				string referenceDesignator = E.name;
+				printf("%s %s %s\n",packageName, partNumber, referenceDesignator);
+				real mountingOffset = 0;
+				string placementSide = "TOP";
+				if (E.mirror)
+					placementSide = "BOTTOM";
+				printf("%.3f %.3f %.3f %0.3f %s ECAD\n",u2mm(E.x), u2mm(E.y), mountingOffset, E.angle, placementSide);
+			}
 		}
 		printf(".END_PLACEMENT\n");
 	}
@@ -109,104 +126,106 @@ int numLibraryExported = 0;
 void createElectricalComponentSection() {
 	output(libFilename, "at") {
 		board(B) B.elements(E) {
-			
-			string packageName = E.attribute["IDF_FAMILYNAME"];
-			if (packageName == "")
-				packageName = E.package.name;
-			string partNumber = E.attribute["IDF_PARTNUMBER"];
-			if (partNumber == "")
-				partNumber = E.package.name;
-			int notExported = 1;
-			for (int i=0; i < numLibraryExported; i++)
-				if ((libraryPackageName[i] == packageName) && (libraryPartNumber[i] == partNumber))
-					notExported = 0;
-			if (notExported){
-				printf(".ELECTRICAL\n");
-				libraryPackageName[numLibraryExported] = packageName;
-				libraryPartNumber[numLibraryExported] = partNumber;
-				numLibraryExported++;
-				
-				string height_att = E.attribute["HEIGHT"];
-				real height = 1;
-				if (height_att != "")
-						height = strtod(height_att);
-				printf("%s %s MM %.3f\n",packageName, partNumber, height);
-				B.libraries(L)
-					if (L.name == E.package.library)
-						L.packages(P) 
-							if (P.name == E.package.name) {
-								int leftPointX = INT_MAX;
-								int leftPointY = INT_MAX;
-								P.wires(W) {
-									if (W.layer == LAYER_TKEEPOUT) {
-										if (W.x1 < leftPointX) {
-											leftPointX = W.x1;
-											leftPointY = W.y1;
-										} else if ((W.x1 == leftPointX) && (W.y1 < leftPointY))
-											leftPointY = W.y1;
-										if (W.x2 < leftPointX) {
-											leftPointX = W.x2;
-											leftPointY = W.y2;
-										} else if ((W.x2 == leftPointX) && (W.y2 < leftPointY))
-											leftPointY = W.y2;
-									}
-								}
-								int cx = leftPointX;
-								int cy = leftPointY;
-								
-								int lx = cx;
-								int ly = cy;
-								
-								int xi[];
-								int yi[];
-								int idx = 0;
-								
-								P.wires(W) {
-									if (W.layer == LAYER_TKEEPOUT) {
-										if ((W.x1 == cx && W.y1 == cy) && !(W.x2 == lx && W.y2 == ly)) {
-											xi[idx] = W.x2;
-											yi[idx++] = W.y2;
-										} else if ((W.x2 == cx && W.y2 == cy) && !(W.x1 == lx && W.y1 == ly)) {
-											xi[idx] = W.x1;
-											yi[idx++] = W.y1;
-										}
-									}
-								}
-								int cp = 0;
-								if (idx==2) {
-									cp = (xi[0]*yi[1]-xi[1]*yi[0]);
-								} // else error
-								real cc;
-								printf("%d %.3f %.3f %.3f\n",cp<0, u2mm(cx), u2mm(cy), 0.0);
-								do {
-									int found = 0;
+			if (!isAttribute(E,"_IDF_IGNORE_")){
+				string packageName = E.attribute["IDF_FAMILYNAME"];
+				if (packageName == "")
+					packageName = E.package.name;
+				string partNumber = E.attribute["IDF_PARTNUMBER"];
+				if (partNumber == "")
+					partNumber = E.package.name;
+				int notExported = 1;
+				for (int i=0; i < numLibraryExported; i++)
+					if ((libraryPackageName[i] == packageName) && (libraryPartNumber[i] == partNumber)){
+						notExported = 0;
+						break;
+					}
+				if (notExported){
+					printf(".ELECTRICAL\n");
+					libraryPackageName[numLibraryExported] = packageName;
+					libraryPartNumber[numLibraryExported] = partNumber;
+					numLibraryExported++;
+					
+					string height_att = E.attribute["HEIGHT"];
+					real height = 1;
+					if (height_att != "")
+							height = strtod(height_att);
+					printf("%s %s MM %.3f\n",packageName, partNumber, height);
+					B.libraries(L)
+						if (L.name == E.package.library)
+							L.packages(P) 
+								if (P.name == E.package.name) {
+									int leftPointX = INT_MAX;
+									int leftPointY = INT_MAX;
 									P.wires(W) {
 										if (W.layer == LAYER_TKEEPOUT) {
-											if ((W.x1 == cx && W.y1 == cy) && !(W.x2 == lx && W.y2 == ly) && (!found)) {
-												lx = cx;
-												ly = cy;
-												cx = W.x2;
-												cy = W.y2;
-												cc = W.curve;
-												found = 1;
-											} else if ((W.x2 == cx && W.y2 == cy) && !(W.x1 == lx && W.y1 == ly) && (!found)) {
-												lx = cx;
-												ly = cy;
-												cx = W.x1;
-												cy = W.y1;
-												cc = -W.curve;
-												found = 1;
+											if (W.x1 < leftPointX) {
+												leftPointX = W.x1;
+												leftPointY = W.y1;
+											} else if ((W.x1 == leftPointX) && (W.y1 < leftPointY))
+												leftPointY = W.y1;
+											if (W.x2 < leftPointX) {
+												leftPointX = W.x2;
+												leftPointY = W.y2;
+											} else if ((W.x2 == leftPointX) && (W.y2 < leftPointY))
+												leftPointY = W.y2;
+										}
+									}
+									int cx = leftPointX;
+									int cy = leftPointY;
+									
+									int lx = cx;
+									int ly = cy;
+									
+									int xi[];
+									int yi[];
+									int idx = 0;
+									
+									P.wires(W) {
+										if (W.layer == LAYER_TKEEPOUT) {
+											if ((W.x1 == cx && W.y1 == cy) && !(W.x2 == lx && W.y2 == ly)) {
+												xi[idx] = W.x2;
+												yi[idx++] = W.y2;
+											} else if ((W.x2 == cx && W.y2 == cy) && !(W.x1 == lx && W.y1 == ly)) {
+												xi[idx] = W.x1;
+												yi[idx++] = W.y1;
 											}
 										}
 									}
-									if (found)
-										printf("%d %.3f %.3f %.3f\n",cp<0, u2mm(cx), u2mm(cy), cc);
-									// else error
-								} while (cx != leftPointX || cy != leftPointY);
-							}
-
-				//printf("%.3f %.3f %.3f %0.3f %s ECAD\n",u2mm(E.x), u2mm(E.y), mountingOffset, E.angle, placementSide);
-				printf(".END_ELECTRICAL\n");
+									int cp = 0;
+									if (idx==2) {
+										cp = (xi[0]*yi[1]-xi[1]*yi[0]);
+									} // else error
+									real cc;
+									printf("%d %.3f %.3f %.3f\n",cp<0, u2mm(cx), u2mm(cy), 0.0);
+									do {
+										int found = 0;
+										P.wires(W) {
+											if (W.layer == LAYER_TKEEPOUT) {
+												if ((W.x1 == cx && W.y1 == cy) && !(W.x2 == lx && W.y2 == ly) && (!found)) {
+													lx = cx;
+													ly = cy;
+													cx = W.x2;
+													cy = W.y2;
+													cc = W.curve;
+													found = 1;
+												} else if ((W.x2 == cx && W.y2 == cy) && !(W.x1 == lx && W.y1 == ly) && (!found)) {
+													lx = cx;
+													ly = cy;
+													cx = W.x1;
+													cy = W.y1;
+													cc = -W.curve;
+													found = 1;
+												}
+											}
+										}
+										if (found)
+											printf("%d %.3f %.3f %.3f\n",cp<0, u2mm(cx), u2mm(cy), cc);
+										// else error
+									} while (cx != leftPointX || cy != leftPointY);
+								}
+					//printf("%.3f %.3f %.3f %0.3f %s ECAD\n",u2mm(E.x), u2mm(E.y), mountingOffset, E.angle, placementSide);
+					printf(".END_ELECTRICAL\n");
+				}
 			}
 		}
 	}

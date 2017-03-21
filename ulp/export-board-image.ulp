@@ -1,0 +1,730 @@
+#usage "en: Export board image\n"
+			"Exports current board as image file\n"
+			"ULP needs imagemagick v7, availabe through system path."
+			"Installer is available at http://www.imagemagick.org/script/download.php"
+			"Usage: RUN export-board-image.ulp\n"
+			"Author: behner@zess.uni-siegen.de"
+			"Author: reuter@zess.uni-siegen.de"
+
+string baseColors[];
+string baseColorValues[];
+string claddingColors[];
+string claddingColorValues[];
+string resistColors[];
+string resistColorValues[];
+real resistColorOpacities[]; 
+string finishColors[];
+string finishColorValues[];
+string silkscreenColors[];
+string silkscreenColorValues[];
+
+string topLabelContent; 
+string bottomLabelContent; 
+
+int baseColorSelection = 0;
+int claddingColorSelection = 0;
+int resistColorSelection = 0;
+int silkscreenColorSelection = 0;
+int finishColorSelection = 0;
+int createAlpha = 1;
+
+string imageDimensions;
+string imageDimensionsExport;
+
+string getImageDimensions(string fileName){
+	string cropstr;
+	string cropfileName = filesetext(fileName,".crop");
+	string cmd = "magick \"" + fileName + "\" -format \"%w %h %x %y %@\" info:\"" + cropfileName  + "\"" ;
+	int result = system(cmd);	
+	fileread(cropstr,cropfileName);
+	return cropstr;
+}
+
+int renderLayer(string baseName, string layerName, string outImageName, string arguments, string crop, string subColor, string copperColor, string resistColor, string finishColor, string silkColor, string resistOpacity, string lightSource, int useAlpha){
+	string oBr = " \\( ";
+	string cBr = " \\) ";
+	if (strstr(OS_SIGNATURE,"Windows")>=0){
+		oBr = " ( ";
+		cBr = " ) ";
+	}
+				
+	string pagesize = strsub(crop,0,strchr(crop,'+'));
+	int xsize = strtol(strsub(pagesize,0,strchr(pagesize,'x')));
+	int ysize = strtol(strsub(pagesize,strchr(pagesize,'x')+1));
+	string fillpoint;
+	sprintf(fillpoint,"+%d+%d",xsize/2,ysize/2);
+	
+	string copperImageName = "\"" + filesetext(baseName, "-" + layerName + "-copper.png") + "\"[" + crop +"] +repage";
+	string resistImageName = "\"" + filesetext(baseName,"-" + layerName + "-solderresist.png") + "\"[" + crop +"] +repage";
+	string silkImageName = "\"" + filesetext(baseName,"-" + layerName + "-silkscreen.png") + "\"[" + crop +"] +repage";
+	string dimImageName = "\"" + filesetext(baseName,"-dimension.png") + "\"[" + crop +"] +repage";
+	
+	string finalAlpha = "-alpha Off " + oBr + dimImageName + " -fill white -floodfill " + fillpoint + " black " + cBr + " -alpha copy -compose CopyOpacity -composite ";
+	if (!useAlpha)
+		finalAlpha = "";
+	
+	if (finishColor==""){
+		finishColor = copperColor;
+	}
+	
+	string pcbLayer = "-size " + pagesize + " canvas:" + subColor;
+	string copperLayer = oBr + copperImageName + " -alpha copy -fill \"" + copperColor + "\" -colorize 100%" + cBr;
+	string resistLayer = oBr + resistImageName + " -negate -alpha copy -fill \"" + resistColor + "\" -colorize 100% -channel a -evaluate Multiply " + resistOpacity + cBr;
+	string copperShade = oBr + copperImageName + " -shade " + lightSource + " -blur 0x1.5 -alpha copy -channel a -evaluate Abs -50%" + cBr;
+	string resistShade = oBr + resistImageName + " -negate -level 0%,400% -shade " + lightSource + " -alpha copy -channel a -evaluate Abs -50%" + cBr;
+	string copperFinish = oBr + copperImageName + " " + resistImageName + " -compose Darken -composite -alpha copy -fill \"" + finishColor + "\" -colorize 100% -alpha deactivate -attenuate 0.3 +noise Gaussian -alpha activate -compose src-over" + cBr;
+	string finishShade = oBr + "+clone -alpha extract -level 0%,400% -shade " + lightSource + " -alpha copy -channel a -evaluate Abs -50%" + cBr;
+	string silkLayer = oBr + silkImageName + oBr + resistImageName + " -negate" + cBr + "-compose Darken -composite -alpha copy -fill \"" + silkColor + "\" -colorize 100% -compose src-over" + cBr;
+	string silkShade = oBr + "+clone -alpha extract -shade " + lightSource + " -blur 0x1.5 -alpha copy -channel a -evaluate Abs -50%" + cBr;
+	
+	if (resistColor==""){
+		resistLayer="";
+		copperLayer="";
+		copperShade="";
+		resistShade="";
+		copperFinish = oBr + copperImageName + " -alpha copy -fill \"" + finishColor + "\" -colorize 100% -alpha deactivate -attenuate 0.3 +noise Gaussian -alpha activate -compose src-over" + cBr;
+	}
+	
+	if (silkColor==""){
+		silkLayer="";
+		silkShade="";
+	}
+	string cmd = "magick " + pcbLayer + copperLayer + resistLayer + copperFinish + finishShade + copperShade + resistShade + silkLayer + silkShade +  "-flatten " + finalAlpha + arguments + " -units PixelsPerInch -density 1270 " + outImageName;
+	output(filesetext(baseName, ".cmd")){
+		printf("%s",cmd);
+	}
+	return system(cmd);
+}
+
+string exportLayerImages(string baseName, string argument, string holesDrilled){
+	string showPadNames = cfgget("Option.PadNames","1");
+	string showSignalNamesPad = cfgget("Option.SignalNamesOnPads","1");
+	string showSignalNamesTraces = cfgget("Option.SignalNamesOnTraces","1");
+	string showViaLength = cfgget("Option.ViaLength","1");
+	string showHolesDrilled = cfgget("Option.DisplayMode","1");
+	string outDirectory;
+	string setLayerFill="";
+	string resetLayerFill="";
+	string resetLayerVisibility="DISPLAY NONE";
+	board(B) {
+	  B.layers(L) {
+		sprintf(setLayerFill,"%sSET FILL_LAYER '%s' %d;\n",setLayerFill, L.name, 1);
+		sprintf(setLayerFill,"%sSET COLOR_LAYER '%s' %d;\n",setLayerFill, L.name, 15);
+		sprintf(resetLayerFill,"%sSET FILL_LAYER '%s' %d;\n",resetLayerFill, L.name, L.fill);
+		sprintf(resetLayerFill,"%sSET COLOR_LAYER '%s' %d;\n",resetLayerFill, L.name, L.color);
+		if (L.visible)
+			resetLayerVisibility += " " + L.name;
+		}
+	  } 
+	  resetLayerVisibility += ";\n";
+	string outscript = "";
+	string resolution = "1270"; // "1270";
+	outscript += "RATSNEST; SET CONFIRM YES;\n";
+	outscript += setLayerFill;
+	outscript += "SET " + "Option.PadNames " + "0" + ";\n";
+	outscript += "SET " + "Option.SignalNamesOnPads " + "0" + ";\n";
+	outscript += "SET " + "Option.SignalNamesOnTraces " + "0" + ";\n";
+	outscript += "SET " + "Option.ViaLength " + "0" + ";\n";
+	outscript += "SET " + "Option.DisplayMode " + holesDrilled + ";\n";
+	outscript += "DISPLAY NONE DIMENSION;\n";
+	outscript += "EXPORT IMAGE '" + filesetext(baseName,"-dimension.png") + "' MONOCHROME " + argument + " " + resolution + ";\n";
+	outscript += "DISPLAY NONE TOP PADS VIAS;\n";
+	outscript += "EXPORT IMAGE '" + filesetext(baseName,"-top-copper.png") + "' MONOCHROME " + argument + " " + resolution + ";\n";
+	outscript += "DISPLAY NONE BOTTOM PADS VIAS;\n";
+	outscript += "EXPORT IMAGE '" + filesetext(baseName,"-bottom-copper.png") + "' MONOCHROME " + argument + " " + resolution + ";\n";
+	outscript += "DISPLAY NONE TSTOP;\n";
+	outscript += "EXPORT IMAGE '" + filesetext(baseName,"-top-solderresist.png") + "' MONOCHROME " + argument + " " + resolution + ";\n";
+	outscript += "DISPLAY NONE BSTOP;\n";
+	outscript += "EXPORT IMAGE '" + filesetext(baseName,"-bottom-solderresist.png") + "' MONOCHROME " + argument + " " + resolution + ";\n";
+	outscript += "DISPLAY NONE TNAMES TPLACE;\n";
+	outscript += "EXPORT IMAGE '" + filesetext(baseName,"-top-silkscreen.png") + "' MONOCHROME " + argument + " " + resolution + ";\n";
+	outscript += "DISPLAY NONE BNAMES BPLACE;\n";
+	outscript += "EXPORT IMAGE '" + filesetext(baseName,"-bottom-silkscreen.png") + "' MONOCHROME " + argument + " " + resolution + ";\n";
+	outscript += "SET " + "Option.PadNames " + showPadNames + ";\n";
+	outscript += "SET " + "Option.SignalNamesOnPads " + showSignalNamesPad + ";\n";
+	outscript += "SET " + "Option.SignalNamesOnTraces " + showSignalNamesTraces + ";\n";
+	outscript += "SET " + "Option.ViaLength " + showViaLength + ";\n";
+	outscript += "SET " + "Option.DisplayMode " + showHolesDrilled + ";\n";
+	outscript += resetLayerFill;
+	outscript += resetLayerVisibility;
+	outscript += "SET CONFIRM OFF;\n";
+	return outscript;
+}
+
+void renderImagePreview(void){
+	string baseName;
+	if (board) board(B) {
+		baseName = B.name;
+	  }
+	topLabelContent = "Creating Preview...";
+	bottomLabelContent = "Creating Preview...";
+	
+	dlgRedisplay();
+	
+	string currentDimensions[];
+	strsplit(currentDimensions,imageDimensions,' ');
+	int pvheight=1024;
+	int width = strtol(currentDimensions[0]);
+	int height = strtol(currentDimensions[1]);
+	string cropstr;
+	sprintf(cropstr,"%dx%d+%d+%d",pvheight,pvheight,(width-pvheight)/2,(height-pvheight)/2);
+	string topOutImageName = "\"" + filesetext(baseName,"-top.png") + "\"";
+	string botOutImageName = "\"" + filesetext(baseName,"-bottom.png") + "\"";
+	string subColor       = baseColorValues[baseColorSelection];
+	string copperColor    = claddingColorValues[claddingColorSelection];
+	string resistColor    = resistColorValues[resistColorSelection];
+	string finishColor    = finishColorValues[finishColorSelection];
+	string silkColor      = silkscreenColorValues[silkscreenColorSelection];
+	string resistOpacity;
+	sprintf(resistOpacity,"%f",resistColorOpacities[resistColorSelection]);
+	
+	renderLayer(baseName, "top", topOutImageName, " -resize 50%", cropstr, subColor, copperColor, resistColor, finishColor, silkColor, resistOpacity,"135x30",createAlpha);
+	renderLayer(baseName, "bottom", botOutImageName, "-flop -resize 50%", cropstr, subColor, copperColor, resistColor, finishColor, silkColor, resistOpacity,"135x30",createAlpha);
+	
+	topLabelContent = "<img src=\"" + filesetext(baseName,"-top.png") + "\">";
+	bottomLabelContent = "<img src=\"" + filesetext(baseName,"-bottom.png") + "\">";
+}
+	
+void renderImageFinal(string baseName){
+	string outbaseName;
+	if (board) board(B) {
+		outbaseName = B.name;
+	  }
+
+	string currentDimensions[];
+	strsplit(currentDimensions,imageDimensionsExport,' ');
+	string cropstr = currentDimensions[4];
+
+	string topOutImageName = "\"" + filesetext(outbaseName,"-top.png") + "\"";
+	string botOutImageName = "\"" + filesetext(outbaseName,"-bottom.png") + "\"";
+
+	string subColor       = baseColorValues[baseColorSelection];
+	string copperColor    = claddingColorValues[claddingColorSelection];
+	string resistColor    = resistColorValues[resistColorSelection];
+	string finishColor    = finishColorValues[finishColorSelection];
+	string silkColor      = silkscreenColorValues[silkscreenColorSelection];
+	string resistOpacity;
+	sprintf(resistOpacity,"%f",resistColorOpacities[resistColorSelection]);
+
+	renderLayer(baseName, "top", topOutImageName, "", cropstr, subColor, copperColor, resistColor, finishColor, silkColor, resistOpacity,"135x30",createAlpha);
+	renderLayer(baseName, "bottom", botOutImageName, "-flop", cropstr, subColor, copperColor, resistColor, finishColor, silkColor, resistOpacity,"135x30",createAlpha);
+	}
+	
+void getColorConfiguation(void){
+	string tempstr = cfgget("exportbrdimg.baseColors",  "yellow (FR4)|#958e00|green (FR4)|#e2ecc6|white (FR4, Rogers)|#e0e0e0|gray (Arlon)|#2a2a1a" );
+	string temp[];
+	int ntemp = strsplit(temp,tempstr,'|');
+	for (int i=0; i<ntemp;i+=2){
+		baseColors[i/2] = temp[i];
+		baseColorValues[i/2] = temp[i+1];
+	}
+	if (board) board(B) {
+		B.attributes(A){
+			if (A.name == strupr("exportBaseColor")){
+				strsplit(temp,A.value,'|');
+				baseColors[i/2] = "[brd] " + temp[0];
+				baseColorValues[i/2] = temp[1];
+				baseColorSelection = i/2;
+			}			
+		}
+	}
+	tempstr = cfgget("exportbrdimg.claddingColors",  "copper|#fb9f65" );
+	ntemp = strsplit(temp,tempstr,'|');
+	for (i=0; i<ntemp;i+=2){
+		claddingColors[i/2] = temp[i];
+		claddingColorValues[i/2] = temp[i+1];
+	}
+	if (board) board(B) {
+		B.attributes(A){
+			if (A.name == strupr("exportCladdingColor")){
+				strsplit(temp,A.value,'|');
+				claddingColors[i/2] = "[brd] " + temp[0];
+				claddingColorValues[i/2] = temp[1];
+				claddingColorSelection = i/2;
+			}			
+		}
+	}
+	tempstr = cfgget("exportbrdimg.resistColors",  "green|#042e00|0.86|blue|#012b81|0.86|red|#810500|0.86|turquoise|#00404d|0.86|purple|#1a004d|0.86|black|#060606|0.98|white|#FAFAFA|0.98|none||0" );
+	ntemp = strsplit(temp,tempstr,'|');
+	for (i=0; i<ntemp;i+=3){
+		resistColors[i/3] = temp[i];
+		resistColorValues[i/3] = temp[i+1];
+		resistColorOpacities[i/3] = strtod(temp[i+2]);
+	}
+	if (board) board(B) {
+		B.attributes(A){
+			if (A.name == strupr("exportResistColor")){
+				strsplit(temp,A.value,'|');
+				resistColors[i/3] = "[brd] " + temp[0];
+				resistColorValues[i/3] = temp[1];
+				resistColorOpacities[i/3] = strtod(temp[2]);
+				resistColorSelection = i/3;
+			}			
+		}
+	}
+	tempstr = cfgget("exportbrdimg.finishColors",  "tin|#d6deeb|gold|#fdea69|none|" );
+	ntemp = strsplit(temp,tempstr,'|');
+	for (i=0; i<ntemp;i+=2){
+		finishColors[i/2] = temp[i];
+		finishColorValues[i/2] = temp[i+1];
+	}
+	if (board) board(B) {
+		B.attributes(A){
+			if (A.name == strupr("exportFinishColor")){
+				strsplit(temp,A.value,'|');
+				finishColors[i/2] = "[brd] " + temp[0];
+				finishColorValues[i/2] = temp[1];
+				finishColorSelection = i/2;
+			}			
+		}
+	}
+	tempstr = cfgget("exportbrdimg.silkscreenColors",  "white|#FAFAFA|black|#060606|none|" );
+	ntemp = strsplit(temp,tempstr,'|');
+	for (i=0; i<ntemp;i+=2){
+		silkscreenColors[i/2] = temp[i];
+		silkscreenColorValues[i/2] = temp[i+1];
+	}
+	if (board) board(B) {
+		B.attributes(A){
+			if (A.name == strupr("exportSilkscreenColor")){
+				strsplit(temp,A.value,'|');
+				silkscreenColors[i/2] = "[brd] " + temp[0];
+				silkscreenColorValues[i/2] = temp[1];
+				silkscreenColorSelection = i/2;
+			}			
+		}
+	}
+}
+void exitSaveColorConfiguration(string cmd){
+	string tempstr = "";
+	string tempcmd = "";
+	int k = 0;
+	for (int i = 0; baseColors[i]; i++){
+		if (strstr(baseColors[i],"[brd]")!=0) {
+			if (k==0)
+				sprintf(tempstr,"%s|%s",baseColors[i],baseColorValues[i]);
+			else
+				sprintf(tempstr,"%s|%s|%s",tempstr,baseColors[i],baseColorValues[i]);
+			k++;
+		}
+	}
+	cfgset("exportbrdimg.baseColors",tempstr);
+	if (strstr(baseColors[baseColorSelection],"[brd] ")==0)
+		baseColors[baseColorSelection] = strsub(baseColors[baseColorSelection],6);
+	sprintf(tempcmd,"%sATTRIBUTE * exportBaseColor '%s|%s';\n",tempcmd,baseColors[baseColorSelection],baseColorValues[baseColorSelection]);
+	
+	k = 0;
+	for (i = 0; claddingColors[i]; i++){
+		if (strstr(claddingColors[i],"[brd]")!=0) {
+			if (k==0)
+				sprintf(tempstr,"%s|%s",claddingColors[i],claddingColorValues[i]);
+			else
+				sprintf(tempstr,"%s|%s|%s",tempstr,claddingColors[i],claddingColorValues[i]);
+			k++;
+		}
+	}
+	cfgset("exportbrdimg.claddingColors",tempstr);
+	if (strstr(claddingColors[claddingColorSelection],"[brd] ")==0)
+		claddingColors[claddingColorSelection] = strsub(claddingColors[claddingColorSelection],6);
+	sprintf(tempcmd,"%sATTRIBUTE * exportCladdingColor '%s|%s';\n",tempcmd,claddingColors[claddingColorSelection],claddingColorValues[claddingColorSelection]);
+	
+	k = 0;
+	for (i = 0; resistColors[i]; i++){
+		if (strstr(resistColors[i],"[brd]")!=0) {
+			if (k==0)
+				sprintf(tempstr,"%s|%s|%g",resistColors[i],resistColorValues[i],resistColorOpacities[i]);
+			else
+				sprintf(tempstr,"%s|%s|%s|%g",tempstr,resistColors[i],resistColorValues[i],resistColorOpacities[i]);
+			k++;
+		}
+	}
+	cfgset("exportbrdimg.resistColors",tempstr);
+	if (strstr(resistColors[resistColorSelection],"[brd] ")==0)
+		resistColors[resistColorSelection] = strsub(resistColors[resistColorSelection],6);
+	sprintf(tempcmd,"%sATTRIBUTE * exportResistColor '%s|%s|%g';\n",tempcmd,resistColors[resistColorSelection],resistColorValues[resistColorSelection],resistColorOpacities[resistColorSelection]);
+	
+	k = 0;
+	for (i = 0; finishColors[i]; i++){
+		if (strstr(finishColors[i],"[brd]")!=0) {
+			if (k==0)
+				sprintf(tempstr,"%s|%s",finishColors[i],finishColorValues[i]);
+			else
+				sprintf(tempstr,"%s|%s|%s",tempstr,finishColors[i],finishColorValues[i]);
+			k++;
+		}
+	}
+	cfgset("exportbrdimg.finishColors",tempstr);
+	if (strstr(finishColors[finishColorSelection],"[brd] ")==0)
+		finishColors[finishColorSelection] = strsub(finishColors[finishColorSelection],6);
+	sprintf(tempcmd,"%sATTRIBUTE * exportFinishColor '%s|%s';\n",tempcmd,finishColors[finishColorSelection],finishColorValues[finishColorSelection]);
+	
+	k = 0;
+	for (i = 0; silkscreenColors[i]; i++){
+		if (strstr(silkscreenColors[i],"[brd]")!=0) {
+			if (k==0)
+				sprintf(tempstr,"%s|%s",silkscreenColors[i],silkscreenColorValues[i]);
+			else
+				sprintf(tempstr,"%s|%s|%s",tempstr,silkscreenColors[i],silkscreenColorValues[i]);
+			k++;
+		}
+	}
+	cfgset("exportbrdimg.silkscreenColors",tempstr);
+	if (strstr(silkscreenColors[silkscreenColorSelection],"[brd] ")==0)
+		silkscreenColors[silkscreenColorSelection] = strsub(silkscreenColors[silkscreenColorSelection],6);
+	sprintf(tempcmd,"%sATTRIBUTE * exportSilkscreenColor '%s|%s';\n",tempcmd,silkscreenColors[silkscreenColorSelection],silkscreenColorValues[silkscreenColorSelection]);
+	
+	
+	exit(tempcmd+cmd);
+}
+
+void editColorDefinition() {
+	int baseColorSelected=0;
+	int claddingColorSelected=0;
+	int resistColorSelected = 0;
+	int finishColorSelected = 0;
+	int silkscreenColorSelected = 0;
+	string baseColorValue="";
+	string claddingColorValue="";
+	string resistColorValue="";
+	real resistColorOpacity=1;
+	string finishColorValue="";
+	string silkscreenColorValue="";
+	dlgDialog("Color Definition Editor") {
+		dlgTabWidget {
+			dlgTabPage("Base material") {
+				dlgHBoxLayout {
+					dlgListView("PRESETS", baseColors, baseColorSelected) {
+						if (dlgSelectionChanged()) baseColorValue = baseColorValues[baseColorSelected];
+					};
+					dlgVBoxLayout {
+						dlgLabel("Color:");
+						dlgStringEdit(baseColorValue);
+						dlgStretch(1);
+					};
+				};
+				dlgHBoxLayout {
+					dlgPushButton("Delete") {
+						int k = 0;
+						for (int i = 0; baseColors[i] != ""; i++) {
+							if (i != baseColorSelected) {
+								baseColorValues[k] = baseColorValues[i];
+								baseColors[k++] = baseColors[i];
+							}
+						}
+						for (i = k;  baseColors[i] != ""; i++) {
+							baseColorValues[i] = "";
+							baseColors[i] = "";
+						}
+					};
+					dlgStretch(1);
+					dlgPushButton("Save") {
+						baseColorValues[baseColorSelected] = baseColorValue;
+					};
+					dlgPushButton("New") {
+						dlgDialog("Preset Name") {
+							string name = "<New>";
+							dlgLabel("Name:");
+							dlgStringEdit(name);
+							dlgHBoxLayout {
+								dlgPushButton("Save") {
+									for (int i = 0;  baseColors[i] != ""; i++) {
+									}
+									baseColors[i] = name;
+									baseColorValues[i] = baseColorValue;
+									baseColorSelected = i;
+									dlgAccept();
+								};
+								dlgPushButton("Cancel") {
+									dlgReject();
+								};
+							};
+						};
+					};
+				};
+				
+			};
+			dlgTabPage("Cladding") {
+				dlgHBoxLayout {
+					dlgListView("PRESETS", claddingColors, claddingColorSelected) {
+						if (dlgSelectionChanged()) claddingColorValue = claddingColorValues[claddingColorSelected];
+					};
+					dlgVBoxLayout {
+						dlgLabel("Color:");
+						dlgStringEdit(claddingColorValue);
+						dlgStretch(1);
+					};
+				};
+				dlgHBoxLayout {
+					dlgPushButton("Delete") {
+						int k = 0;
+						for (int i = 0; claddingColors[i] != ""; i++) {
+							if (i != claddingColorSelected) {
+								claddingColorValues[k] = claddingColorValues[i];
+								claddingColors[k++] = claddingColors[i];
+							}
+						}
+						for (i = k;  claddingColors[i] != ""; i++) {
+							claddingColorValues[i] = "";
+							claddingColors[i] = "";
+						}
+					};
+					dlgStretch(1);
+					dlgPushButton("Save") {
+						claddingColorValues[claddingColorSelected] = claddingColorValue;
+					};
+					dlgPushButton("New") {
+						dlgDialog("Preset Name") {
+							string name = "<New>";
+							dlgLabel("Name:");
+							dlgStringEdit(name);
+							dlgHBoxLayout {
+								dlgPushButton("Save") {
+									for (int i = 0;  claddingColors[i] != ""; i++) {
+									}
+									claddingColors[i] = name;
+									claddingColorValues[i] = claddingColorValue;
+									claddingColorSelected = i;
+									dlgAccept();
+								};
+								dlgPushButton("Cancel") {
+									dlgReject();
+								};
+							};
+						};
+					};
+				};
+			};
+			dlgTabPage("Solder resist") {
+				dlgHBoxLayout {
+					dlgListView("PRESETS", resistColors, resistColorSelected) {
+						if (dlgSelectionChanged()) {
+							resistColorValue = resistColorValues[resistColorSelected];
+							resistColorOpacity = resistColorOpacities[resistColorSelected];
+						}
+					};
+					dlgVBoxLayout {
+						dlgLabel("Color:");
+						dlgStringEdit(resistColorValue);
+						dlgLabel("Opacity:");
+						dlgRealEdit(resistColorOpacity, 0, 1);
+						dlgStretch(1);
+					};
+				};
+				dlgHBoxLayout {
+					dlgPushButton("Delete") {
+						int k = 0;
+						for (int i = 0; resistColors[i] != ""; i++) {
+							if (i != resistColorSelected) {
+								resistColorValues[k] = resistColorValues[i];
+								resistColorOpacities[k] = resistColorOpacities[i];
+								resistColors[k++] = resistColors[i];
+							}
+						}
+						for (i = k;  resistColors[i] != ""; i++) {
+							resistColorValues[i] = "";
+							resistColorOpacities[i] = 0;
+							resistColors[i] = "";
+						}
+					};
+					dlgStretch(1);
+					dlgPushButton("Save") {
+						resistColorValues[resistColorSelected] = resistColorValue;
+						resistColorOpacities[resistColorSelected] = resistColorOpacity;
+					};
+					dlgPushButton("New") {
+						dlgDialog("Preset Name") {
+							string name = "<New>";
+							dlgLabel("Name:");
+							dlgStringEdit(name);
+							dlgHBoxLayout {
+								dlgPushButton("Save") {
+									for (int i = 0;  resistColors[i] != ""; i++) {
+									}
+									resistColors[i] = name;
+									resistColorValues[i] = resistColorValue;
+									resistColorOpacities[i] = resistColorOpacity;
+									resistColorSelected = i;
+									dlgAccept();
+								};
+								dlgPushButton("Cancel") {
+									dlgReject();
+								};
+							};
+						};
+					};
+				};				
+			};
+			dlgTabPage("Pad finish") {
+				dlgHBoxLayout {
+					dlgListView("PRESETS", finishColors, finishColorSelected) {
+						if (dlgSelectionChanged()) finishColorValue = finishColorValues[finishColorSelected];
+					};
+					dlgVBoxLayout {
+						dlgLabel("Color:");
+						dlgStringEdit(finishColorValue);
+						dlgStretch(1);
+					};
+				};
+				dlgHBoxLayout {
+					dlgPushButton("Delete") {
+						int k = 0;
+						for (int i = 0; finishColors[i] != ""; i++) {
+							if (i != finishColorSelected) {
+								finishColorValues[k] = finishColorValues[i];
+								finishColors[k++] = finishColors[i];
+							}
+						}
+						for (i = k;  finishColors[i] != ""; i++) {
+							finishColorValues[i] = "";
+							finishColors[i] = "";
+						}
+					};
+					dlgStretch(1);
+					dlgPushButton("Save") {
+						finishColorValues[finishColorSelected] = finishColorValue;
+					};
+					dlgPushButton("New") {
+						dlgDialog("Preset Name") {
+							string name = "<New>";
+							dlgLabel("Name:");
+							dlgStringEdit(name);
+							dlgHBoxLayout {
+								dlgPushButton("Save") {
+									for (int i = 0;  finishColors[i] != ""; i++) {
+									}
+									finishColors[i] = name;
+									finishColorValues[i] = finishColorValue;
+									finishColorSelected = i;
+									dlgAccept();
+								};
+								dlgPushButton("Cancel") {
+									dlgReject();
+								};
+							};
+						};
+					};
+				};
+			};
+			dlgTabPage("Silkscreen") {
+				dlgHBoxLayout {
+					dlgListView("PRESETS", silkscreenColors, silkscreenColorSelected) {
+						if (dlgSelectionChanged()) silkscreenColorValue = silkscreenColorValues[silkscreenColorSelected];
+					};
+					dlgVBoxLayout {
+						dlgLabel("Color:");
+						dlgStringEdit(silkscreenColorValue);
+						dlgStretch(1);
+					};
+				};
+				dlgHBoxLayout {
+					dlgPushButton("Delete") {
+						int k = 0;
+						for (int i = 0; silkscreenColors[i] != ""; i++) {
+							if (i != silkscreenColorSelected) {
+								silkscreenColorValues[k] = silkscreenColorValues[i];
+								silkscreenColors[k++] = silkscreenColors[i];
+							}
+						}
+						for (i = k;  silkscreenColors[i] != ""; i++) {
+							silkscreenColorValues[i] = "";
+							silkscreenColors[i] = "";
+						}
+					};
+					dlgStretch(1);
+					dlgPushButton("Save") {
+						silkscreenColorValues[silkscreenColorSelected] = silkscreenColorValue;
+					};
+					dlgPushButton("New") {
+						dlgDialog("Preset Name") {
+							string name = "<New>";
+							dlgLabel("Name:");
+							dlgStringEdit(name);
+							dlgHBoxLayout {
+								dlgPushButton("Save") {
+									for (int i = 0;  silkscreenColors[i] != ""; i++) {
+									}
+									silkscreenColors[i] = name;
+									silkscreenColorValues[i] = silkscreenColorValue;
+									silkscreenColorSelected = i;
+									dlgAccept();
+								};
+								dlgPushButton("Cancel") {
+									dlgReject();
+								};
+							};
+						};
+					};
+				};
+			}
+		};
+	};
+}
+
+string baseName;
+real aspectRatio;
+string windowCmd;
+if (board) board(B) {
+	baseName = B.name;
+	int xll = B.area.x1;
+	int yll = B.area.y1;
+	int xru = B.area.x2;
+	int yru = B.area.y2;
+	
+	real centerx = u2mm(xll)/2+u2mm(xru)/2;
+	real centery = u2mm(yll)/2+u2mm(yru)/2;
+
+	sprintf(windowCmd,"WINDOW (%gmm %gmm) (%gmm %gmm);\n",centerx - 10.24,centery + 10.24 ,centerx + 10.24,centery - 10.24 );
+}
+  
+windowCmd+=exportLayerImages(baseName,"WINDOW", "0");
+windowCmd+=exportLayerImages(filesetext(baseName,"-export.png"),"", "0");
+windowCmd+="RUN " + argv[0] + " PV;\n";
+if (argc<2)
+	exit(windowCmd);
+
+getColorConfiguation();
+
+imageDimensions = getImageDimensions(filesetext(baseName,"-dimension.png"));
+imageDimensionsExport = getImageDimensions(filesetext(baseName,"-export-dimension.png"));
+
+topLabelContent = "<img src=\"" + filesetext(baseName,"-top.png") + "\">";
+bottomLabelContent = "<img src=\"" + filesetext(baseName,"-bottom.png") + "\">";
+
+dlgDialog("Export Board as Image"){
+	renderImagePreview();
+	dlgHBoxLayout{
+		dlgVBoxLayout{
+			dlgLabel("Base material color");
+			dlgComboBox(baseColors, baseColorSelection) renderImagePreview();
+			dlgLabel("Cladding color");
+			dlgComboBox(claddingColors, claddingColorSelection) renderImagePreview();
+			dlgLabel("Solder resist color"); 
+			dlgComboBox(resistColors, resistColorSelection) renderImagePreview();
+			dlgLabel("Pad finish color");
+			dlgComboBox(finishColors, finishColorSelection) renderImagePreview();
+			dlgLabel("Silkscreen color");
+			dlgComboBox(silkscreenColors, silkscreenColorSelection) renderImagePreview();
+			dlgCheckBox("Use outline for Transparency", createAlpha) renderImagePreview();
+				
+			dlgPushButton("&Edit Color definition") editColorDefinition();
+			dlgPushButton("&Set preview to MARK position") {
+				string windowCmd="WINDOW (R -10.24mm -10.24mm) (R 10.24mm 10.24mm);\n";
+				windowCmd+=exportLayerImages(baseName,"WINDOW", "0");
+				windowCmd+="RUN " + argv[0] + " PV;\n";
+				exitSaveColorConfiguration(windowCmd);
+			};
+
+			dlgStretch(1);
+			dlgPushButton("+&Export Board") renderImageFinal(filesetext(baseName,"-export.png"));
+		};
+		dlgTabWidget {
+			dlgTabPage("&Top View") {
+				dlgLabel(topLabelContent,1);
+			}
+			dlgTabPage("&Bottom View") {
+				dlgLabel(bottomLabelContent,1);
+			}
+		} 
+	};
+};
+exitSaveColorConfiguration("");
